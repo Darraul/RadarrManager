@@ -1919,6 +1919,51 @@ $LetterboxdButton.Add_Click({
         $MoviesList.MultiSelect = $true
         $MoviesForm.Controls.Add($MoviesList)
         
+        # Create context menu for right-click actions
+        $ContextMenu = New-Object System.Windows.Forms.ContextMenuStrip
+        $ContextMenu.BackColor = $ColorPanel
+        $ContextMenu.ForeColor = "White"
+        
+        $ViewTrailerMenuItem = New-Object System.Windows.Forms.ToolStripMenuItem
+        $ViewTrailerMenuItem.Text = "🎬 View Trailer on YouTube"
+        $ViewTrailerMenuItem.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $ContextMenu.Items.Add($ViewTrailerMenuItem) | Out-Null
+        
+        $ViewTrailerMenuItem.Add_Click({
+                # Get the item that was right-clicked
+                $selectedItem = $MoviesList.FocusedItem
+                
+                if (-not $selectedItem) {
+                    [System.Windows.Forms.MessageBox]::Show("Please right-click on a movie to view its trailer.", "No Selection", "OK", "Warning") | Out-Null
+                    return
+                }
+                
+                # Extract title from the item text (format: "1. Title\n(Year)")
+                $itemText = $selectedItem.Text
+                $titleMatch = [regex]::Match($itemText, '^\d+\.\s*(.+?)(?:\n|\r|$)')
+                if ($titleMatch.Success) {
+                    $movieTitle = $titleMatch.Groups[1].Value.Trim()
+                    
+                    # Extract year if present
+                    $yearMatch = [regex]::Match($itemText, '\((\d{4})\)')
+                    $searchQuery = if ($yearMatch.Success) { 
+                        "$movieTitle $($yearMatch.Groups[1].Value) official trailer"
+                    }
+                    else {
+                        "$movieTitle official trailer"
+                    }
+                    
+                    # Open YouTube search
+                    $youtubeUrl = "https://www.youtube.com/results?search_query=$([System.Uri]::EscapeDataString($searchQuery))"
+                    Start-Process $youtubeUrl
+                }
+                else {
+                    [System.Windows.Forms.MessageBox]::Show("Could not parse movie title.", "Error", "OK", "Error") | Out-Null
+                }
+            }.GetNewClosure())
+        
+        $MoviesList.ContextMenuStrip = $ContextMenu
+        
         # Selection counter label
         $SelectionCountLabel = New-Object System.Windows.Forms.Label
         $SelectionCountLabel.Text = "0 movies selected"
@@ -2212,7 +2257,7 @@ $LetterboxdButton.Add_Click({
         $CloseBtn.ForeColor = "White"
         $CloseBtn.FlatStyle = "Flat"
         $CloseBtn.Size = New-Object System.Drawing.Size(100, 35)
-        $CloseBtn.Location = New-Object System.Drawing.Point(530, 570)
+        $CloseBtn.Location = New-Object System.Drawing.Point(515, 570)
         $MoviesForm.Controls.Add($CloseBtn)
         $CloseBtn.Add_Click({ $this.FindForm().Close() }.GetNewClosure())
         
@@ -2329,48 +2374,70 @@ $LetterboxdButton.Add_Click({
                 $Rank++
                 $displayText = if ($year) { "$Rank. $title`n($year)" } else { "$Rank. $title" }
                 
-                # Try to get poster from OMDb
+                # Try to get poster from TMDB (more reliable than OMDb)
+                $posterLoaded = $false
                 try {
-                    $searchParam = if ($year) { "&y=$year" } else { "" }
-                    $omdbUrl = "https://www.omdbapi.com/?t=$([System.Uri]::EscapeDataString($title))$searchParam&apikey=b6003d8a"
-                    $omdbResult = Invoke-RestMethod -Uri $omdbUrl -TimeoutSec 3 -ErrorAction SilentlyContinue
+                    # Ensure TLS 1.2 is used
+                    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
                     
-                    # If year was missing, try to get it from OMDb
-                    if (-not $year -and $omdbResult -and $omdbResult.Year) {
-                        $year = $omdbResult.Year
-                        $fullTitle = "$title ($year)"
-                        $displayText = "$Rank. $title`n($year)"
-                    }
+                    # TMDB API v3 - search for movie
+                    $tmdbApiKey = "2dca580c2a14b55200e784d157207b4d"  # Public API key
+                    $searchQuery = [System.Uri]::EscapeDataString($title)
+                    $tmdbUrl = "https://api.themoviedb.org/3/search/movie?api_key=$tmdbApiKey&query=$searchQuery"
+                    if ($year) { $tmdbUrl += "&year=$year" }
                     
-                    if ($omdbResult -and $omdbResult.Poster -and $omdbResult.Poster -ne "N/A") {
-                        $imageBytes = $WebClient.DownloadData($omdbResult.Poster)
-                        $ms = New-Object System.IO.MemoryStream($imageBytes, 0, $imageBytes.Length)
-                        $originalImage = [System.Drawing.Image]::FromStream($ms)
+                    $tmdbResult = Invoke-RestMethod -Uri $tmdbUrl -TimeoutSec 5 -ErrorAction Stop
+                    
+                    if ($tmdbResult -and $tmdbResult.results -and $tmdbResult.results.Count -gt 0) {
+                        $movie = $tmdbResult.results[0]
                         
-                        $resizedImage = New-Object System.Drawing.Bitmap(80, 120)
-                        $graphics = [System.Drawing.Graphics]::FromImage($resizedImage)
-                        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-                        $graphics.DrawImage($originalImage, 0, 0, 80, 120)
-                        $graphics.Dispose()
+                        # If year was missing, get it from TMDB
+                        if (-not $year -and $movie.release_date) {
+                            $year = ($movie.release_date -split '-')[0]
+                            $fullTitle = "$title ($year)"
+                            $displayText = "$Rank. $title`n($year)"
+                        }
                         
-                        $ImageList.Images.Add($fullTitle, $resizedImage)
-                        $originalImage.Dispose()
-                        $ms.Dispose()
-                    }
-                    else {
-                        # Add placeholder
-                        $placeholder = New-Object System.Drawing.Bitmap(80, 120)
-                        $g = [System.Drawing.Graphics]::FromImage($placeholder)
-                        $g.Clear([System.Drawing.Color]::FromArgb(60, 60, 60))
-                        $g.Dispose()
-                        $ImageList.Images.Add($fullTitle, $placeholder)
+                        if ($movie.poster_path) {
+                            try {
+                                $posterUrl = "https://image.tmdb.org/t/p/w92$($movie.poster_path)"
+                                $WebClient.Headers.Add("User-Agent", "Mozilla/5.0")
+                                $imageBytes = $WebClient.DownloadData($posterUrl)
+                                $ms = New-Object System.IO.MemoryStream($imageBytes, 0, $imageBytes.Length)
+                                $originalImage = [System.Drawing.Image]::FromStream($ms)
+                                
+                                $resizedImage = New-Object System.Drawing.Bitmap(80, 120)
+                                $graphics = [System.Drawing.Graphics]::FromImage($resizedImage)
+                                $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                                $graphics.DrawImage($originalImage, 0, 0, 80, 120)
+                                $graphics.Dispose()
+                                
+                                $ImageList.Images.Add($fullTitle, $resizedImage)
+                                $originalImage.Dispose()
+                                $ms.Dispose()
+                                $posterLoaded = $true
+                            }
+                            catch {
+                                # Image download failed
+                            }
+                        }
                     }
                 }
                 catch {
-                    # Add placeholder on error
+                    # TMDB API failed
+                }
+                
+                # Add placeholder if poster didn't load
+                if (-not $posterLoaded) {
                     $placeholder = New-Object System.Drawing.Bitmap(80, 120)
                     $g = [System.Drawing.Graphics]::FromImage($placeholder)
                     $g.Clear([System.Drawing.Color]::FromArgb(60, 60, 60))
+                    # Draw movie icon on placeholder
+                    $font = New-Object System.Drawing.Font("Segoe UI", 24)
+                    $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(100, 100, 100))
+                    $g.DrawString("🎬", $font, $brush, 22, 40)
+                    $font.Dispose()
+                    $brush.Dispose()
                     $g.Dispose()
                     $ImageList.Images.Add($fullTitle, $placeholder)
                 }
